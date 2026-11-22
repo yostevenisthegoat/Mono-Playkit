@@ -1,0 +1,6 @@
+{
+  "name": "Mono PlayKit",
+  "description": "An offline-first, 100% free companion toolkit of timers, scoreboards, dice, board game helpers, puzzle solvers, and physical toy trackers in the minimalist Mono design system.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

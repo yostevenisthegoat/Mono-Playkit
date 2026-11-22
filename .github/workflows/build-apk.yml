@@ -1,0 +1,225 @@
+name: Build & Release Public APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build & Publish APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Temurin JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify Java environment
+        run: |
+          echo "JAVA_HOME=${JAVA_HOME:-<not set>}"
+          if ! command -v java >/dev/null 2>&1; then
+            echo "::error::Java executable could not be detected on PATH."
+            exit 1
+          fi
+          java -version
+          VERSION_OUTPUT=$(java -version 2>&1 | head -n 1)
+          RAW_VER=$(echo "$VERSION_OUTPUT" | sed -E 's/.*version "([^"]+)".*/\1/')
+          if [ -z "$RAW_VER" ]; then
+            echo "::error::Could not parse Java version from: $VERSION_OUTPUT"
+            exit 1
+          fi
+          MAJOR=$(echo "$RAW_VER" | cut -d'.' -f1)
+          if [ "$MAJOR" = "1" ]; then
+            MAJOR=$(echo "$RAW_VER" | cut -d'.' -f2)
+          fi
+          MAJOR=${MAJOR%%[^0-9]*}
+          if [ -z "$MAJOR" ]; then
+            echo "::error::Could not detect numeric Java major version from '$RAW_VER'."
+            exit 1
+          fi
+          echo "Detected Java major version: $MAJOR"
+          if [ "$MAJOR" -lt 17 ]; then
+            echo "::error::Java 17 or newer is required, but detected Java $MAJOR."
+            exit 1
+          fi
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Create temporary debug keystore
+        run: |
+          if [ -f "./debug.keystore" ]; then
+            echo "Existing ./debug.keystore found; reusing it."
+          else
+            KEYTOOL_BIN="keytool"
+            if [ -n "${JAVA_HOME:-}" ] && [ -x "${JAVA_HOME}/bin/keytool" ]; then
+              KEYTOOL_BIN="${JAVA_HOME}/bin/keytool"
+            fi
+            "$KEYTOOL_BIN" -genkeypair -v \
+              -keystore ./debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000
+          fi
+          if [ ! -f "./debug.keystore" ]; then
+            echo "::error::Failed to create ./debug.keystore."
+            exit 1
+          fi
+          echo "Confirmed ./debug.keystore is ready."
+
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Extract App Metadata and Rename APK
+        id: metadata
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          import re
+          import shutil
+
+          def read_file(path):
+              return open(path, "r", encoding="utf-8").read() if os.path.exists(path) else ""
+
+          build_kts = read_file("app/build.gradle.kts")
+          libs_toml = read_file("gradle/libs.versions.toml")
+          strings_xml = read_file("app/src/main/res/values/strings.xml")
+          settings_kts = read_file("settings.gradle.kts")
+
+          # Extract versionName from app/build.gradle.kts first, then libs.versions.toml
+          app_version = None
+          m_ver = re.search(r'versionName\s*=\s*"([^"]+)"', build_kts)
+          if m_ver:
+              app_version = m_ver.group(1).strip()
+          if not app_version:
+              m_toml_ver = re.search(r'(?m)^(?:versionName|appVersion)\s*=\s*"([^"]+)"', libs_toml)
+              if m_toml_ver:
+                  app_version = m_toml_ver.group(1).strip()
+          if not app_version:
+              app_version = "1.0"
+
+          # Extract app name from strings.xml, settings.gradle.kts, or build.gradle.kts
+          raw_name = None
+          m_str = re.search(r'<string\s+name="app_name"[^>]*>([^<]+)</string>', strings_xml)
+          if m_str:
+              raw_name = m_str.group(1).strip()
+          if not raw_name:
+              m_set = re.search(r'rootProject\.name\s*=\s*"([^"]+)"', settings_kts)
+              if m_set:
+                  raw_name = m_set.group(1).strip()
+          if not raw_name:
+              m_app = re.search(r'resValue\(\s*"string"\s*,\s*"app_name"\s*,\s*"([^"]+)"\s*\)', build_kts)
+              if m_app:
+                  raw_name = m_app.group(1).strip()
+          if not raw_name:
+              raw_name = "AndroidApp"
+
+          # Sanitize APP_NAME for clean cross-platform & URL-safe APK filename
+          app_name = re.sub(r'\s+', '-', raw_name.strip())
+          app_name = re.sub(r'[^A-Za-z0-9._-]', '', app_name).strip('-._') or "AndroidApp"
+          safe_version = re.sub(r'[^A-Za-z0-9._-]', '', app_version.lstrip('vV')) or "1.0"
+
+          apk_file_name = f"{app_name}-v{safe_version}.apk"
+          src_apk = "app/build/outputs/apk/debug/app-debug.apk"
+          if not os.path.isfile(src_apk):
+              raise SystemExit(f"Expected debug APK not found at {src_apk}")
+
+          dst_apk = os.path.join("app/build/outputs/apk/debug", apk_file_name)
+          if os.path.abspath(src_apk) != os.path.abspath(dst_apk):
+              shutil.copy2(src_apk, dst_apk)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_f:
+              env_f.write(f"APP_NAME={app_name}\n")
+              env_f.write(f"APP_VERSION={safe_version}\n")
+              env_f.write(f"APK_FILE_NAME={apk_file_name}\n")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out_f:
+              out_f.write(f"app_name={app_name}\n")
+              out_f.write(f"app_version={safe_version}\n")
+              out_f.write(f"apk_file_name={apk_file_name}\n")
+
+          print(f"Prepared {dst_apk} (APP_NAME={app_name}, APP_VERSION={safe_version})")
+          PYEOF
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-v${{ env.APP_VERSION }}
+          path: app/build/outputs/apk/debug/${{ env.APK_FILE_NAME }}
+          if-no-files-found: error
+
+      - name: Prepare APK release asset and changelog
+        id: prepare_release
+        run: |
+          RELEASE_DIR=$(mktemp -d)
+          SRC_APK="app/build/outputs/apk/debug/${APK_FILE_NAME}"
+          if [ ! -f "$SRC_APK" ]; then
+            echo "::error::Prepared APK not found at $SRC_APK"
+            exit 1
+          fi
+          ASSET_PATH="${RELEASE_DIR}/${APK_FILE_NAME}"
+          cp "$SRC_APK" "$ASSET_PATH"
+
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ]; then
+            COMMIT_LOG=$(git log "${PREV_TAG}..HEAD" --no-merges --pretty=format:"- %s (%h)" -n 15 || true)
+          else
+            COMMIT_LOG=$(git log --no-merges --pretty=format:"- %s (%h)" -n 10 || true)
+          fi
+          if [ -z "$COMMIT_LOG" ]; then
+            LATEST_MSG=$(git log -1 --pretty=format:"- %s (%h)" || echo "- Automated build release")
+            COMMIT_LOG="$LATEST_MSG"
+          fi
+
+          DELIMITER="CHANGELOG_EOF_${GITHUB_RUN_ID}_${RANDOM}"
+          {
+            echo "asset_path=${ASSET_PATH}"
+            echo "changelog<<${DELIMITER}"
+            echo "$COMMIT_LOG"
+            echo "${DELIMITER}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK to Public GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGELOG_BODY: ${{ steps.prepare_release.outputs.changelog }}
+        run: |
+          NOTES_FILE=$(mktemp)
+          {
+            echo "## 📢 What's New"
+            echo ""
+            printf '%s\n' "$CHANGELOG_BODY"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 🌐 Open Source Build"
+            echo "- Built publicly by GitHub Actions"
+            echo "- **App Name:** ${APP_NAME}"
+            echo "- **Version:** v${APP_VERSION}"
+            echo "- **Run Number:** #${GITHUB_RUN_NUMBER}"
+            echo "- **Commit SHA:** \`${GITHUB_SHA}\`"
+          } > "$NOTES_FILE"
+
+          gh release create "v${APP_VERSION}-build-${GITHUB_RUN_NUMBER}" \
+            "${{ steps.prepare_release.outputs.asset_path }}" \
+            --title "${APP_NAME} v${APP_VERSION} (Build #${GITHUB_RUN_NUMBER})" \
+            --notes-file "$NOTES_FILE" \
+            --latest

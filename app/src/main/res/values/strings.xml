@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Mono PlayKit</string>
+    <string name="tagline">Your Games. Your Tools.</string>
+    <string name="home_greeting">Hello there!</string>
+    <string name="home_welcome">Welcome to Mono PlayKit</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_explore">Explore</string>
+    <string name="nav_favorites">Favorites</string>
+    <string name="nav_history">History</string>
+    <string name="nav_settings">Settings</string>
+</resources>
