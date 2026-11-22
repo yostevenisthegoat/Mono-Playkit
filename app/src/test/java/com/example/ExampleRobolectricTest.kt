@@ -6,6 +6,8 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -24,6 +26,27 @@ class ExampleRobolectricTest {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val appName = context.getString(R.string.app_name)
     assertEquals("Mono PlayKit", appName)
+  }
+
+  @Test
+  fun `launcher intent adaptive icon and fonts resolve cleanly`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val pkgInfo = context.packageManager.getPackageInfo(
+      context.packageName,
+      android.content.pm.PackageManager.GET_ACTIVITIES,
+    )
+    val activities = pkgInfo.activities?.map { it.name } ?: emptyList()
+    assertTrue("MainActivity missing from manifest: $activities", activities.contains(MainActivity::class.java.name))
+
+    val mainAct = pkgInfo.activities?.firstOrNull { it.name == MainActivity::class.java.name }
+    assertNotNull(mainAct)
+    assertTrue("MainActivity must be exported", mainAct!!.exported)
+
+    assertNotNull(context.getDrawable(R.mipmap.ic_launcher))
+    assertNotNull(context.getDrawable(R.mipmap.ic_launcher_round))
+    assertNotNull(context.resources.getFont(R.font.space_grotesk))
+    assertNotNull(context.resources.getFont(R.font.plus_jakarta_sans))
+    assertNotNull(context.resources.getFont(R.font.jetbrains_mono))
   }
 
   @Test
